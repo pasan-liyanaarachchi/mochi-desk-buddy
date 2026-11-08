@@ -57,7 +57,65 @@ void setup() {
 }
 
 void loop() {
-  // Main state machine logic will be added here
+  checkSensors();
+
+  if (currentState == STATE_EYES){
+    drawRandomEyes();
+  }
+
+  else if (currentState == STATE_DIZZY){
+    drawDizzyEyes();
+
+    // Switch to ANGRY only after it stops shaking and is stable for 1000ms
+    if (millis() - reactionTimer > 1000) {
+      currentState = STATE_ANGRY;
+      reactionTimer = millis(); // Reset the timer for the angry phase
+      display.clearDisplay();
+    }
+  }
+
+  else if (currentState == STATE_ANGRY){
+    drawAngryEyes();
+
+     // Once the angry time is up, cool down and go back to normal EYES
+    if (millis() - reactionTimer > ANGRY_DURATION) {
+      currentState = STATE_EYES;
+      display.clearDisplay(); 
+    }
+  }
+
+  else if (currentState == STATE_INFO) {
+    drawTimeAndBattery();
+  }
+
+  else if (currentState == STATE_QUOTE) {
+    drawQuote();
+  }
+
 }
 
-// Custom functions (checkSensors, drawRandomEyes, drawDizzyEyes, etc.) will be added below
+// Custom Functions will be coded below
+
+void checkSensors() {
+  
+}
+
+void drawRandomEyes() {
+
+}
+
+void drawDizzyEyes() {
+
+}
+
+void drawAngryEyes() {
+
+}
+
+void drawTimeAndBattery() {
+
+}
+
+void drawQuote() {
+
+}
