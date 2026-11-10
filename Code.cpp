@@ -8,7 +8,7 @@
 #include "OswaldFont.h" 
 #include "quotes.h"
 
-RTC_DS1307 rtc; 
+RTC_DS3231 rtc; 
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
