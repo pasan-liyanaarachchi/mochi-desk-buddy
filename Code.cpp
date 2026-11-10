@@ -5,7 +5,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <RTClib.h>
-#include "Oswald_VariableFont_wght9pt7b.h" 
+#include "OswaldFont.h" 
 #include "quotes.h"
 
 RTC_DS1307 rtc; 
