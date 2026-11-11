@@ -255,11 +255,189 @@ void drawAngryEyes() {
 
 
 void drawTimeAndBattery() {
+  // Clear the OLED screen buffer from whatever was drawn previously
+  display.clearDisplay();
 
+  // --- 1. Fetch Time ---
+  // Query the Real-Time Clock (RTC) module to get the current date and time
+  DateTime now = rtc.now();
+
+  // --- 2. Calculate Battery Level ---
+  // Read the analog voltage value from the battery pin (0 to 4095 on ESP32/similar ADCs)
+  int rawADC = analogRead(BATTERY_PIN);
+  
+  // Convert the raw ADC reading (expected between 2047 and 2605) into a percentage (0 to 100)
+  // The constrain() function ensures the final value does not go below 0 or above 100
+  int batteryPct = constrain(map(rawADC, 2047, 2605, 0, 100), 0, 100);
+
+  // Determine number of battery bars (0 to 4) based on the calculated percentage
+  int numBars = 0;
+  if (batteryPct > 80) numBars = 4;        // Full battery
+  else if (batteryPct > 50) numBars = 3;   // High battery
+  else if (batteryPct > 20) numBars = 2;   // Medium battery
+  else if (batteryPct > 5)  numBars = 1;   // Low battery (below 5% gets 0 bars)
+
+  // --- 3. Draw Battery Icon with Bars (Top Right) ---
+  // Set the starting X and Y coordinates for the battery icon
+  int batX = 96;
+  int batY = 2;
+  
+  // Draw the hollow outer rectangle of the battery shell (24 pixels wide, 10 pixels tall)
+  display.drawRect(batX, batY, 24, 10, SSD1306_WHITE);        
+  
+  // Draw the solid small positive terminal "nub" on the right side of the battery
+  display.fillRect(batX + 24, batY + 3, 2, 4, SSD1306_WHITE); 
+  
+  // Loop to draw the individual filled battery bars inside the shell
+  // Each bar is 4 pixels wide and spaced 5 pixels apart (4px bar + 1px gap)
+  for (int i = 0; i < numBars; i++) {
+    display.fillRect(batX + 2 + (i * 5), batY + 2, 4, 6, SSD1306_WHITE);
+  }
+
+  // --- 4. Draw Time (Center) ---
+  // Set the text scaling factor to 3 for large time digits
+  display.setTextSize(3);
+  // Set the text color to white (pixels turned on)
+  display.setTextColor(SSD1306_WHITE);
+
+  // Create a character array to hold the formatted time string ("HH:MM\0")
+  char timeStr[6];
+  // Format the hour and minute variables into the array with leading zeros (e.g., "09:05")
+  sprintf(timeStr, "%02d:%02d", now.hour(), now.minute());
+
+  // Move the invisible text cursor to the horizontal and vertical center for the time
+  display.setCursor(19, 23);
+  // Write the time string to the display buffer
+  display.print(timeStr);
+
+  // --- 5. Draw Date Only (Bottom) ---
+  // Shrink the text scaling factor to 1 for the smaller date text
+  display.setTextSize(1);
+  
+  // Create a character array to hold the formatted date string ("DD/MM/YYYY\0")
+  char bottomStr[15];
+  
+  // Format the day, month, and year variables into the array with leading zeros
+  sprintf(bottomStr, "%02d/%02d/%04d", now.day(), now.month(), now.year());
+  
+  // Move the text cursor to the bottom center of the screen for the date
+  display.setCursor(30, 54); 
+  // Write the date string to the display buffer
+  display.print(bottomStr);
+
+  // Push the completely rendered buffer (battery, time, and date) to the physical OLED screen
+  display.display();
 }
 
 
 
-void drawQuote() {
+int currentQuoteIndex = -1; // -1 indicates we need to pick a fresh quote from the array
 
+void drawQuote() {
+  // If no quote is currently selected, pick a random one
+  if (currentQuoteIndex == -1) {
+    currentQuoteIndex = random(0, NUM_QUOTES);
+  }
+
+  // Clear the OLED buffer
+  display.clearDisplay();
+  
+  // Apply the custom Oswald font for the quote text
+  display.setFont(&OswaldFont); 
+  display.setTextSize(1); 
+  display.setTextColor(SSD1306_WHITE);
+  
+  // Disable automatic text wrapping so we can manually calculate clean word breaks
+  display.setTextWrap(false); 
+  
+  // Fetch the quote from flash memory and convert it to a standard String object
+  String quote = String(motivationalQuotes[currentQuoteIndex]);
+  
+  // --- 1. Break the quote into lines based on screen width ---
+  String lines[8]; // Array to hold the separated lines (max 8 lines supported)
+  int lineCount = 0; // Tracks how many lines we have created
+  
+  int lastSpace = 0; // Index of the beginning of the current word
+  int nextSpace = quote.indexOf(' '); // Index of the next space character
+  String currentLine = ""; // Holds the text for the line currently being built
+
+  // Loop through the quote word by word
+  while (nextSpace != -1) {
+    // Extract the next word from the string
+    String word = quote.substring(lastSpace, nextSpace);
+    
+    // Create a temporary test line by appending the new word (and a space if needed)
+    String testLine = currentLine + (currentLine.length() > 0 ? " " : "") + word;
+    
+    // Variables to hold the pixel dimensions of the text
+    int16_t x1, y1;
+    uint16_t w, h;
+    
+    // Measure exactly how many pixels wide and tall the test line would be
+    display.getTextBounds(testLine, 0, 0, &x1, &y1, &w, &h);
+    
+    // If adding this word pushes the line beyond the 128-pixel screen width...
+    if (w > SCREEN_WIDTH) {
+      // Save the previous valid line to our array and move to the next index
+      lines[lineCount++] = currentLine;
+      // Start a brand new line with the word that didn't fit
+      currentLine = word;
+    } else {
+      // If it fits, make the test line the official current line
+      currentLine = testLine;
+    }
+    
+    // Move our indices forward to find the next word
+    lastSpace = nextSpace + 1;
+    nextSpace = quote.indexOf(' ', lastSpace);
+  }
+  
+  // Process the final word in the string (which doesn't have a trailing space)
+  String lastWord = quote.substring(lastSpace);
+  String testLine = currentLine + (currentLine.length() > 0 ? " " : "") + lastWord;
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(testLine, 0, 0, &x1, &y1, &w, &h);
+  
+  // If the final word makes the line too long, split it into two lines
+  if (w > SCREEN_WIDTH) {
+    lines[lineCount++] = currentLine;
+    lines[lineCount++] = lastWord;
+  } else {
+    // Otherwise, append the final line as is
+    lines[lineCount++] = testLine;
+  }
+
+  // --- 2. Calculate true total height and vertical centering ---
+  int lineHeight = 15; // Vertical pixel spacing between lines
+  
+  // Measure the dimensions of the very first line to establish baseline text metrics
+  display.getTextBounds(lines[0], 0, 0, &x1, &y1, &w, &h);
+  
+  // Calculate the total height of the text block: 
+  // Height of one line (h) + the spacing needed for all remaining lines
+  int trueTotalHeight = h + ((lineCount - 1) * lineHeight);
+
+  // Calculate the Y coordinate to center the block vertically on the 64-pixel screen.
+  // We subtract y1 because custom GFX fonts draw from a baseline, not the top-left corner.
+  int startY = ((SCREEN_HEIGHT - trueTotalHeight) / 2) - y1;
+
+  // --- 3. Print each line centered horizontally ---
+  for (int i = 0; i < lineCount; i++) {
+    // Measure the exact pixel width of the current line
+    display.getTextBounds(lines[i], 0, 0, &x1, &y1, &w, &h);
+    
+    // Calculate the X coordinate to center this specific line horizontally
+    int startX = (SCREEN_WIDTH - w) / 2;
+    
+    // Failsafe: If the text is somehow wider than the screen, pin it to the left edge
+    if (startX < 0) startX = 0; 
+    
+    // Set the cursor for this line, moving down by 'lineHeight' for each subsequent line
+    display.setCursor(startX, startY + (i * lineHeight));
+    display.print(lines[i]);
+  }
+  
+  // Push the final rendered quote to the OLED
+  display.display();
 }
