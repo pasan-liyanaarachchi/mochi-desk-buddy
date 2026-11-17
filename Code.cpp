@@ -3,7 +3,7 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_SH110X.h>
 #include <RTClib.h>
 #include "OswaldFont.h" 
 #include "quotes.h"
@@ -13,7 +13,7 @@ RTC_DS3231 rtc;
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 Adafruit_MPU6050 mpu;
 
@@ -44,8 +44,8 @@ void setup() {
     for(;;);
   }
   
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("SSD1306 allocation failed");
+  if(!display.begin(0x3C, true)) {
+    Serial.println("SH110X allocation failed");
     for(;;);
   }
   display.clearDisplay();
@@ -160,16 +160,16 @@ void drawRandomEyes() {
   if (isBlinking) {
     // Draw closed eyes (simple horizontal lines)
     // Draws a 24-pixel wide horizontal white line to represent the closed left eye
-    display.drawLine(leftEyeCenter_X - 12, eyeCenter_Y, leftEyeCenter_X + 12, eyeCenter_Y, SSD1306_WHITE);
+    display.drawLine(leftEyeCenter_X - 12, eyeCenter_Y, leftEyeCenter_X + 12, eyeCenter_Y, SH110X_WHITE);
     // Draws the closed right eye
-    display.drawLine(rightEyeCenter_X - 12, eyeCenter_Y, rightEyeCenter_X + 12, eyeCenter_Y, SSD1306_WHITE);
+    display.drawLine(rightEyeCenter_X - 12, eyeCenter_Y, rightEyeCenter_X + 12, eyeCenter_Y, SH110X_WHITE);
   } 
   else {
     // Draw open eyes with current gaze offset
     // Draws a filled rounded rectangle for the left eye, applying the random X/Y shift
-    display.fillRoundRect(leftEyeCenter_X - 12 + eyeOffsetX, eyeCenter_Y - 16 + eyeOffsetY, 24, 32, 6, SSD1306_WHITE);
+    display.fillRoundRect(leftEyeCenter_X - 12 + eyeOffsetX, eyeCenter_Y - 16 + eyeOffsetY, 24, 32, 6, SH110X_WHITE);
     // Draws the shifted right eye to match
-    display.fillRoundRect(rightEyeCenter_X - 12 + eyeOffsetX, eyeCenter_Y - 16 + eyeOffsetY, 24, 32, 6, SSD1306_WHITE);
+    display.fillRoundRect(rightEyeCenter_X - 12 + eyeOffsetX, eyeCenter_Y - 16 + eyeOffsetY, 24, 32, 6, SH110X_WHITE);
   }
 
   display.display(); // Pushes the freshly drawn buffer to the physical OLED screen
@@ -196,18 +196,18 @@ void drawDizzyEyes() {
   
   // Draw the wide white eye bases
   // Draws the left white eye base, slightly larger than normal open eyes
-  display.fillRoundRect(lx - 14, cy - 18, 28, 36, 8, SSD1306_WHITE);
+  display.fillRoundRect(lx - 14, cy - 18, 28, 36, 8, SH110X_WHITE);
   // Draws the right white eye base
-  display.fillRoundRect(rx - 14, cy - 18, 28, 36, 8, SSD1306_WHITE);
+  display.fillRoundRect(rx - 14, cy - 18, 28, 36, 8, SH110X_WHITE);
   
   // Draw the uncoordinated spinning black pupils
   int pupilRadius = 6;                    // Sets how large the black pupil circles will be
   int offsetR = 5;                        // Sets how far from the center the pupils will orbit
   
   // Calculates the left pupil's X/Y orbit position using cosine/sine and draws it in black
-  display.fillCircle(lx + offsetR * cos(angleL), cy + offsetR * sin(angleL), pupilRadius, SSD1306_BLACK);
+  display.fillCircle(lx + offsetR * cos(angleL), cy + offsetR * sin(angleL), pupilRadius, SH110X_BLACK);
   // Calculates the right pupil's X/Y orbit position and draws it in black
-  display.fillCircle(rx + offsetR * cos(angleR), cy + offsetR * sin(angleR), pupilRadius, SSD1306_BLACK);
+  display.fillCircle(rx + offsetR * cos(angleR), cy + offsetR * sin(angleR), pupilRadius, SH110X_BLACK);
   
   display.display();                      // Pushes the freshly drawn dizzy face to the physical OLED screen
 }
@@ -226,9 +226,9 @@ void drawAngryEyes() {
   // 1. Draw solid open eyes
 
   // Draws the white rounded rectangle for the left eye
-  display.fillRoundRect(leftX, y, w, h, 4, SSD1306_WHITE);
+  display.fillRoundRect(leftX, y, w, h, 4, SH110X_WHITE);
   // Draws the white rounded rectangle for the right eye
-  display.fillRoundRect(rightX, y, w, h, 4, SSD1306_WHITE);
+  display.fillRoundRect(rightX, y, w, h, 4, SH110X_WHITE);
 
   // 2. Draw black triangles over the top inner corners to simulate angry brows
   // By drawing black shapes over the white eyes, we create "negative space" masks
@@ -238,7 +238,7 @@ void drawAngryEyes() {
     leftX - 5, y - 5,        // Top left corner of the masking triangle
     leftX + w + 5, y - 5,    // Top right corner of the masking triangle
     leftX + w + 5, y + 14,   // Bottom right corner (creates the downward inward slant)
-    SSD1306_BLACK            // Draws in black to "erase" the top-right corner of the white eye
+    SH110X_BLACK            // Draws in black to "erase" the top-right corner of the white eye
   );
 
   // Right eye mask (slants down towards the left)
@@ -246,7 +246,7 @@ void drawAngryEyes() {
     rightX - 5, y - 5,       // Top left corner of the masking triangle
     rightX + w + 5, y - 5,   // Top right corner of the masking triangle
     rightX - 5, y + 14,      // Bottom left corner (creates the downward inward slant)
-    SSD1306_BLACK            // Draws in black to "erase" the top-left corner of the white eye
+    SH110X_BLACK            // Draws in black to "erase" the top-left corner of the white eye
   );
 
   display.display();              // Pushes the freshly drawn angry face to the physical OLED screen
@@ -283,22 +283,22 @@ void drawTimeAndBattery() {
   int batY = 2;
   
   // Draw the hollow outer rectangle of the battery shell (24 pixels wide, 10 pixels tall)
-  display.drawRect(batX, batY, 24, 10, SSD1306_WHITE);        
+  display.drawRect(batX, batY, 24, 10, SH110X_WHITE);        
   
   // Draw the solid small positive terminal "nub" on the right side of the battery
-  display.fillRect(batX + 24, batY + 3, 2, 4, SSD1306_WHITE); 
+  display.fillRect(batX + 24, batY + 3, 2, 4, SH110X_WHITE); 
   
   // Loop to draw the individual filled battery bars inside the shell
   // Each bar is 4 pixels wide and spaced 5 pixels apart (4px bar + 1px gap)
   for (int i = 0; i < numBars; i++) {
-    display.fillRect(batX + 2 + (i * 5), batY + 2, 4, 6, SSD1306_WHITE);
+    display.fillRect(batX + 2 + (i * 5), batY + 2, 4, 6, SH110X_WHITE);
   }
 
   // --- 4. Draw Time (Center) ---
   // Set the text scaling factor to 3 for large time digits
   display.setTextSize(3);
   // Set the text color to white (pixels turned on)
-  display.setTextColor(SSD1306_WHITE);
+  display.setTextColor(SH110X_WHITE);
 
   // Create a character array to hold the formatted time string ("HH:MM\0")
   char timeStr[6];
@@ -331,8 +331,6 @@ void drawTimeAndBattery() {
 
 
 
-int currentQuoteIndex = -1; // -1 indicates we need to pick a fresh quote from the array
-
 void drawQuote() {
   // If no quote is currently selected, pick a random one
   if (currentQuoteIndex == -1) {
@@ -345,7 +343,7 @@ void drawQuote() {
   // Apply the custom Oswald font for the quote text
   display.setFont(&OswaldFont); 
   display.setTextSize(1); 
-  display.setTextColor(SSD1306_WHITE);
+  display.setTextColor(SH110X_WHITE);
   
   // Disable automatic text wrapping so we can manually calculate clean word breaks
   display.setTextWrap(false); 
@@ -378,8 +376,10 @@ void drawQuote() {
     
     // If adding this word pushes the line beyond the 128-pixel screen width...
     if (w > SCREEN_WIDTH) {
-      // Save the previous valid line to our array and move to the next index
-      lines[lineCount++] = currentLine;
+      // Memory bounds check: Save the previous valid line ONLY if we haven't hit the 8-line limit
+      if (lineCount < 8) {
+        lines[lineCount++] = currentLine;
+      }
       // Start a brand new line with the word that didn't fit
       currentLine = word;
     } else {
@@ -401,11 +401,11 @@ void drawQuote() {
   
   // If the final word makes the line too long, split it into two lines
   if (w > SCREEN_WIDTH) {
-    lines[lineCount++] = currentLine;
-    lines[lineCount++] = lastWord;
+    if (lineCount < 8) lines[lineCount++] = currentLine;
+    if (lineCount < 8) lines[lineCount++] = lastWord;
   } else {
     // Otherwise, append the final line as is
-    lines[lineCount++] = testLine;
+    if (lineCount < 8) lines[lineCount++] = testLine;
   }
 
   // --- 2. Calculate true total height and vertical centering ---
