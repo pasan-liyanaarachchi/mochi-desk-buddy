@@ -9,7 +9,7 @@ A custom-built, interactive desktop companion. Mochi functions entirely offline,
 * **Daily Motivation:** Displays randomly selected motivational quotes stored directly in the microcontroller's flash memory.
 
 ## 🛠️ Hardware Stack
-* **Display:** SSD1306 OLED (128x64)
+* **Display:** SH1106 OLED (1.3 inch)
 * **Motion Sensor:** MPU6050 6-axis Accelerometer & Gyroscope
 * **Timekeeping:** DS3231 Real-Time Clock (RTC) module
 * **Software:** C++ / Arduino IDE environment
