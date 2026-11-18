@@ -43,6 +43,9 @@ void setup() {
     Serial.println("Couldn't find RTC");
     for(;;);
   }
+
+  // Use the below line in intial code upload to extract PC's date and time
+  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   
   if(!display.begin(0x3C, true)) {
     Serial.println("SH110X allocation failed");
