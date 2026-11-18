@@ -317,11 +317,11 @@ void drawTimeAndBattery() {
   // Shrink the text scaling factor to 1 for the smaller date text
   display.setTextSize(1);
   
-  // Create a character array to hold the formatted date string ("DD/MM/YYYY\0")
+  // Create a character array to hold the formatted date string ("YYYY/MM/DD\0")
   char bottomStr[15];
   
-  // Format the day, month, and year variables into the array with leading zeros
-  sprintf(bottomStr, "%02d/%02d/%04d", now.day(), now.month(), now.year());
+  // Format the year, month, and day variables into the array with leading zeros
+  sprintf(bottomStr, "%04d/%02d/%02d", now.year(), now.month(), now.day());
   
   // Move the text cursor to the bottom center of the screen for the date
   display.setCursor(30, 54); 
