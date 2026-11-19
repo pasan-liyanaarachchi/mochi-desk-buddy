@@ -17,7 +17,7 @@ Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 Adafruit_MPU6050 mpu;
 
-enum BuddyState { STATE_EYES, STATE_DIZZY, STATE_ANGRY, STATE_INFO, STATE_QUOTE };
+enum BuddyState { STATE_EYES, STATE_DIZZY, STATE_ANGRY, STATE_INFO, STATE_QUOTE, STATE_BIRTHDAY };
 BuddyState currentState = STATE_EYES;
 
 // Variables and Constants
@@ -32,6 +32,10 @@ int eyeOffsetX = 0;
 int eyeOffsetY = 0;
 bool isBlinking = false;
 int currentQuoteIndex = -1;
+
+// Birthday Tracking Variables
+bool birthdayDismissed = false;  // Tracks if the user has closed the birthday screen today so it doesn't immediately reopen
+unsigned long lastDateCheck = 0; // Stores the last timestamp (in ms) the RTC was queried for the date
 
 
 
@@ -65,6 +69,7 @@ void setup() {
 
 void loop() {
   checkSensors();
+  checkBirthday(); // Periodically checks the RTC to see if today is Feb 15th
 
   if (currentState == STATE_EYES){
     drawRandomEyes();
@@ -99,6 +104,18 @@ void loop() {
     drawQuote();
   }
 
+  else if (currentState == STATE_BIRTHDAY) {
+    // Render the animated birthday message and cake
+    drawBirthdayScreen();
+
+    // Wait for a double tap on the touch sensor to dismiss the birthday screen
+    if (checkDoubleTap()) {
+      birthdayDismissed = true;  // Prevent the screen from re-triggering for the rest of Feb 15th
+      currentState = STATE_EYES; // Return Mochi to normal idle eyes
+      display.clearDisplay();    // Wipe the buffer before switching states
+    }
+  }
+
 }
 
 
@@ -122,6 +139,88 @@ void checkSensors() {
     // Continuously reset the timer as long as it is actively shaking
     reactionTimer = millis();
   }
+}
+
+
+
+void checkBirthday() {
+  // Check RTC date once per second (1000ms) to avoid spamming the I2C bus every loop cycle
+  if (millis() - lastDateCheck >= 1000) {
+    lastDateCheck = millis();  // Reset the 1-second check timer
+    DateTime now = rtc.now();  // Fetch the current date and time from the DS3231 RTC
+
+    // Check if the current date is February 15th
+    if (now.month() == 2 && now.day() == 15) {
+      // Only trigger if it hasn't been dismissed yet and isn't already showing
+      if (!birthdayDismissed && currentState != STATE_BIRTHDAY) {
+        currentState = STATE_BIRTHDAY;
+        display.clearDisplay();
+      }
+    } else {
+      // On any day other than Feb 15th, reset the flag so it triggers again next year
+      birthdayDismissed = false;
+    }
+  }
+}
+
+
+
+bool checkDoubleTap() {
+  // TODO: Add TTP223 double-tap detection logic here once wired
+  return false; // Returns false by default until touch sensor logic is implemented
+}
+
+
+
+void drawBirthdayScreen() {
+  display.clearDisplay();         // Wipe the OLED buffer before drawing the new frame
+  display.setFont(NULL);          // Reset to the default 5x7 font in case OswaldFont was previously active
+  display.setTextColor(SH110X_WHITE);
+  display.setTextSize(1);
+
+  // Center the 15-character title horizontally: 15 chars * 6px width = 90px -> (128 - 90) / 2 = 19
+  display.setCursor(19, 8);
+  display.print("HAPPY BIRTHDAY!");
+
+  // Draw the cake body as a solid white rectangle
+  display.fillRect(46, 38, 36, 16, SH110X_WHITE);
+  // Draw a black horizontal line across the middle to represent a frosting layer
+  display.drawFastHLine(46, 45, 36, SH110X_BLACK);
+
+  // Horizontal X positions for the three candles on top of the cake
+  int candleX[3] = {53, 63, 73};
+  // Alternates between true and false every 300ms to drive the flame flicker and sparkle animation
+  bool flameToggle = (millis() / 300) % 2;
+
+  // Loop through and draw each of the 3 candles and its animated flame
+  for (int i = 0; i < 3; i++) {
+    // Draw the vertical candle stick (2px wide, 9px tall)
+    display.fillRect(candleX[i], 29, 2, 9, SH110X_WHITE);
+
+    // Alternate between a round flame and a tall, slender flickering flame
+    if (flameToggle) {
+      display.fillCircle(candleX[i], 25, 2, SH110X_WHITE);
+    } else {
+      display.drawPixel(candleX[i], 24, SH110X_WHITE);
+      display.drawPixel(candleX[i] + 1, 25, SH110X_WHITE);
+      display.drawPixel(candleX[i], 26, SH110X_WHITE);
+    }
+  }
+
+  // Draw twinkling background sparkles that alternate positions every 300ms
+  if (flameToggle) {
+    display.drawPixel(20, 26, SH110X_WHITE);
+    display.drawPixel(108, 30, SH110X_WHITE);
+    display.drawPixel(28, 48, SH110X_WHITE);
+    display.drawPixel(100, 46, SH110X_WHITE);
+  } else {
+    display.drawPixel(24, 34, SH110X_WHITE);
+    display.drawPixel(104, 24, SH110X_WHITE);
+    display.drawPixel(18, 44, SH110X_WHITE);
+    display.drawPixel(110, 50, SH110X_WHITE);
+  }
+
+  display.display(); // Push the rendered birthday frame to the physical OLED screen
 }
 
 
