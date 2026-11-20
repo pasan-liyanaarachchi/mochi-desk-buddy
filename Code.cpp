@@ -17,25 +17,63 @@ Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 Adafruit_MPU6050 mpu;
 
-enum BuddyState { STATE_EYES, STATE_DIZZY, STATE_ANGRY, STATE_INFO, STATE_QUOTE, STATE_BIRTHDAY };
+enum BuddyState { STATE_EYES, STATE_SHAKING, STATE_DIZZY, STATE_ANGRY, STATE_INFO, STATE_QUOTE, STATE_BIRTHDAY };
 BuddyState currentState = STATE_EYES;
 
 // Variables and Constants
 unsigned long reactionTimer = 0; 
+const unsigned long SHAKE_SETTLE_TIME = 300; // Wait 300ms after shaking stops before turning dizzy
+const unsigned long DIZZY_DURATION = 1000;   // Dizzy spiral phase lasts 1000ms before turning angry
 const unsigned long ANGRY_DURATION = 2000; 
 const float SHAKE_THRESHOLD = 15.0; 
 const int BATTERY_PIN = 0; 
 
+// Shake Eye-Slide Tracking Variables (normalized -1.0 to 1.0)
+float gazeX = 0.0f;
+float gazeY = 0.0f;
+float gazeTargetX = 0.0f;
+float gazeTargetY = 0.0f;
+
+// Eye Animation Timing Variables
 unsigned long lastEyeMove = 0;
 unsigned long lastBlink = 0;
+unsigned long nextBlinkDelay = 3000; // Stores the rolled delay until the next blink
+unsigned long nextMoveDelay = 2000;  // Stores the rolled delay until the next gaze shift
 int eyeOffsetX = 0;
 int eyeOffsetY = 0;
 bool isBlinking = false;
-int currentQuoteIndex = -1;
 
-// Birthday Tracking Variables
-bool birthdayDismissed = false;  // Tracks if the user has closed the birthday screen today so it doesn't immediately reopen
-unsigned long lastDateCheck = 0; // Stores the last timestamp (in ms) the RTC was queried for the date
+// Quote & Static Screen Redraw Flags
+int currentQuoteIndex = -1;
+bool quoteDrawn = false;         // Ensures drawQuote() only computes & renders once per quote
+unsigned long lastInfoDraw = 0;  // Throttles STATE_INFO redraws to once per second
+bool infoNeedsRedraw = true;     // Forces an immediate draw when entering STATE_INFO
+int lastBirthdayFrame = -1;      // Tracks flame animation frame (-1 forces immediate draw)
+
+// RTC & Birthday Tracking Variables
+bool rtcInvalid = false;         // Set to true if the DS3231 lost power (dead/missing coin cell)
+bool birthdayDismissed = false;  // Tracks if the user has closed the birthday screen today
+unsigned long lastDateCheck = 0; // Stores the last timestamp (in ms) the RTC was queried
+
+// Random Quote Timer Variables (triggers randomly every 1.5 to 2.5 hours)
+unsigned long lastRandomQuoteTime = 0;           // Timestamp (in ms) of the last auto-triggered quote
+unsigned long nextQuoteInterval = 7200000;       // Randomized wait time before the next auto-quote
+bool isAutoQuote = false;                        // Distinguishes auto-triggered quotes from manual quotes
+unsigned long quoteDisplayStart = 0;             // Timestamp (in ms) when an auto-triggered quote started
+const unsigned long AUTO_QUOTE_DURATION = 15000; // Auto-triggered quotes stay on screen for 15 seconds
+
+// Function Prototypes (required for PlatformIO / standard C++ compilation)
+void checkSensors();
+void checkBirthday();
+bool checkDoubleTap();
+void drawRandomEyes();
+void drawShakeEyes();
+void drawSpiral(int cx, int cy, float rot, int maxR);
+void drawDizzyEyes();
+void drawAngryEyes();
+void drawTimeAndBattery();
+void drawQuote();
+void drawBirthdayScreen();
 
 
 
@@ -48,7 +86,16 @@ void setup() {
     for(;;);
   }
 
-  // Use the below line in intial code upload to extract PC's date and time
+  // Check if the DS3231 lost power (e.g., dead or missing coin cell)
+  if (rtc.lostPower()) {
+    rtcInvalid = true;
+    Serial.println("RTC lost power, time is invalid!");
+    // Uncomment both lines below to reset the RTC to the sketch compile time:
+    // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // rtcInvalid = false;
+  }
+
+  // Use the below line in initial code upload to extract PC's date and time
   // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   
   if(!display.begin(0x3C, true)) {
@@ -63,6 +110,9 @@ void setup() {
     for(;;);
   }
   mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+
+  // Pick a random initial interval between 1.5 hours (5,400,000 ms) and 2.5 hours (9,000,000 ms)
+  nextQuoteInterval = random(5400000, 9000000);
 }
 
 
@@ -71,15 +121,64 @@ void loop() {
   checkSensors();
   checkBirthday(); // Periodically checks the RTC to see if today is Feb 15th
 
+  // --- 1. Handle Double-Tap State Cycling ---
+  // Cycles: STATE_EYES -> STATE_INFO -> STATE_QUOTE -> STATE_EYES (or dismisses STATE_BIRTHDAY)
+  if (checkDoubleTap()) {
+    if (currentState == STATE_BIRTHDAY) {
+      birthdayDismissed = true;  // Prevent the birthday screen from re-triggering for the rest of Feb 15th
+      currentState = STATE_EYES; // Return to normal idle eyes
+    } 
+    else if (currentState == STATE_EYES) {
+      infoNeedsRedraw = true;    // Force immediate draw upon entering STATE_INFO
+      currentState = STATE_INFO; // Switch from eyes to time & battery screen
+    } 
+    else if (currentState == STATE_INFO) {
+      currentQuoteIndex = -1;    // Reset index so drawQuote() picks a fresh random quote
+      quoteDrawn = false;        // Allow drawQuote() to render the new quote
+      isAutoQuote = false;       // Mark as manual so it stays open until double-tapped again
+      currentState = STATE_QUOTE;
+    } 
+    else if (currentState == STATE_QUOTE) {
+      isAutoQuote = false;       // Clear auto-quote flag if dismissed early
+      currentState = STATE_EYES; // Return to normal idle eyes
+    }
+    display.clearDisplay();      // Wipe the buffer before rendering the new state
+  }
+
+  // --- 2. Handle Random ~2-Hour Quote Trigger ---
+  // Only triggers when Mochi is idle in STATE_EYES so it won't interrupt other states
+  if (currentState == STATE_EYES && (millis() - lastRandomQuoteTime >= nextQuoteInterval)) {
+    lastRandomQuoteTime = millis();               // Reset the timer for the next countdown
+    nextQuoteInterval = random(5400000, 9000000); // Pick a new random wait time (1.5 to 2.5 hours)
+    currentQuoteIndex = -1;                       // Pick a new random quote
+    quoteDrawn = false;                           // Allow drawQuote() to render the new quote
+    isAutoQuote = true;                           // Flag as auto-triggered so it closes after 15s
+    quoteDisplayStart = millis();                 // Record start time for the 15-second display window
+    currentState = STATE_QUOTE;
+    display.clearDisplay();
+  }
+
+  // --- 3. Run Active State ---
   if (currentState == STATE_EYES){
     drawRandomEyes();
+  }
+
+  else if (currentState == STATE_SHAKING) {
+    drawShakeEyes();
+
+    // Once shaking stops and stays calm for SHAKE_SETTLE_TIME (300ms), enter the dizzy phase
+    if (millis() - reactionTimer > SHAKE_SETTLE_TIME) {
+      currentState = STATE_DIZZY;
+      reactionTimer = millis(); // Reset timer so the 1000ms dizzy calm-down starts cleanly
+      display.clearDisplay();
+    }
   }
 
   else if (currentState == STATE_DIZZY){
     drawDizzyEyes();
 
-    // Switch to ANGRY only after it stops shaking and is stable for 1000ms
-    if (millis() - reactionTimer > 1000) {
+    // Switch to ANGRY after the dizzy spiral phase finishes (1000ms)
+    if (millis() - reactionTimer > DIZZY_DURATION) {
       currentState = STATE_ANGRY;
       reactionTimer = millis(); // Reset the timer for the angry phase
       display.clearDisplay();
@@ -89,7 +188,7 @@ void loop() {
   else if (currentState == STATE_ANGRY){
     drawAngryEyes();
 
-     // Once the angry time is up, cool down and go back to normal EYES
+    // Once the angry time is up, cool down and go back to normal EYES
     if (millis() - reactionTimer > ANGRY_DURATION) {
       currentState = STATE_EYES;
       display.clearDisplay(); 
@@ -102,25 +201,32 @@ void loop() {
 
   else if (currentState == STATE_QUOTE) {
     drawQuote();
-  }
 
-  else if (currentState == STATE_BIRTHDAY) {
-    // Render the animated birthday message and cake
-    drawBirthdayScreen();
-
-    // Wait for a double tap on the touch sensor to dismiss the birthday screen
-    if (checkDoubleTap()) {
-      birthdayDismissed = true;  // Prevent the screen from re-triggering for the rest of Feb 15th
-      currentState = STATE_EYES; // Return Mochi to normal idle eyes
-      display.clearDisplay();    // Wipe the buffer before switching states
+    // If this quote popped up automatically, return to eyes after AUTO_QUOTE_DURATION (15s)
+    if (isAutoQuote && (millis() - quoteDisplayStart >= AUTO_QUOTE_DURATION)) {
+      isAutoQuote = false;
+      currentState = STATE_EYES;
+      display.clearDisplay();
     }
   }
 
+  else if (currentState == STATE_BIRTHDAY) {
+    // Render the animated birthday message and cake (dismissal is handled in the double-tap block above)
+    drawBirthdayScreen();
+  }
+
+  // Cap loop speed to ~50 FPS to reduce I2C bus spam, save battery, and keep the ESP32-C3 cool
+  delay(20);
 }
 
 
 
 void checkSensors() {
+  // Ignore shakes while the birthday screen is active
+  if (currentState == STATE_BIRTHDAY) {
+    return;
+  }
+
   sensors_event_t a, g, temp;  // Create containers for sensor readings acceleration, gyroscope, and temperature
   mpu.getEvent(&a, &g, &temp); // Fetch the latest data from the motion sensor
 
@@ -129,11 +235,15 @@ void checkSensors() {
                         pow(a.acceleration.y, 2) +  
                         pow(a.acceleration.z, 2));
 
-  // If it's shaking, shift to the dizzy state immediately
+  // If it's shaking, shift to STATE_SHAKING and push the eye gaze toward the shake direction
   if (totalAccel > SHAKE_THRESHOLD) {
-    
-    if (currentState != STATE_DIZZY) {
-      currentState = STATE_DIZZY;
+    // Normalize X/Y acceleration into a -1.0 to 1.0 target for drawShakeEyes()
+    gazeTargetX = constrain(a.acceleration.x / SHAKE_THRESHOLD, -1.0f, 1.0f);
+    gazeTargetY = constrain(a.acceleration.y / SHAKE_THRESHOLD, -1.0f, 1.0f);
+
+    if (currentState != STATE_SHAKING) {
+      isAutoQuote = false; // Clean up auto-quote flag if a shake interrupts a quote
+      currentState = STATE_SHAKING;
       display.clearDisplay(); 
     }
     // Continuously reset the timer as long as it is actively shaking
@@ -144,6 +254,11 @@ void checkSensors() {
 
 
 void checkBirthday() {
+  // Skip date checks if the RTC lost power and holds an invalid date
+  if (rtcInvalid) {
+    return;
+  }
+
   // Check RTC date once per second (1000ms) to avoid spamming the I2C bus every loop cycle
   if (millis() - lastDateCheck >= 1000) {
     lastDateCheck = millis();  // Reset the 1-second check timer
@@ -151,14 +266,21 @@ void checkBirthday() {
 
     // Check if the current date is February 15th
     if (now.month() == 2 && now.day() == 15) {
-      // Only trigger if it hasn't been dismissed yet and isn't already showing
-      if (!birthdayDismissed && currentState != STATE_BIRTHDAY) {
+      // Only trigger from STATE_EYES so it doesn't fight with shaking/dizzy/angry/info/quote states
+      if (!birthdayDismissed && currentState == STATE_EYES) {
+        lastBirthdayFrame = -1; // Force immediate draw
         currentState = STATE_BIRTHDAY;
         display.clearDisplay();
       }
     } else {
       // On any day other than Feb 15th, reset the flag so it triggers again next year
       birthdayDismissed = false;
+
+      // Auto-exit the birthday screen if midnight passed without a double-tap dismissal
+      if (currentState == STATE_BIRTHDAY) {
+        currentState = STATE_EYES;
+        display.clearDisplay();
+      }
     }
   }
 }
@@ -173,6 +295,15 @@ bool checkDoubleTap() {
 
 
 void drawBirthdayScreen() {
+  // Alternates between 0 and 1 every 300ms to drive the flame flicker and sparkle animation
+  int flameToggle = (millis() / 300) % 2;
+
+  // Skip redrawing if the animation frame hasn't changed yet (saves I2C bandwidth & power)
+  if (flameToggle == lastBirthdayFrame) {
+    return;
+  }
+  lastBirthdayFrame = flameToggle;
+
   display.clearDisplay();         // Wipe the OLED buffer before drawing the new frame
   display.setFont(NULL);          // Reset to the default 5x7 font in case OswaldFont was previously active
   display.setTextColor(SH110X_WHITE);
@@ -189,8 +320,6 @@ void drawBirthdayScreen() {
 
   // Horizontal X positions for the three candles on top of the cake
   int candleX[3] = {53, 63, 73};
-  // Alternates between true and false every 300ms to drive the flame flicker and sparkle animation
-  bool flameToggle = (millis() / 300) % 2;
 
   // Loop through and draw each of the 3 candles and its animated flame
   for (int i = 0; i < 3; i++) {
@@ -229,30 +358,25 @@ void drawRandomEyes() {
   unsigned long currentMillis = millis(); // Grabs the current system time in milliseconds
 
   // 1. Handle Blinking Logic (Blink every 2-5 seconds, keep closed for 150ms)
-
-  // If open and 2-5s have passed...  
-  if (!isBlinking && (currentMillis - lastBlink > random(2000, 5000))) { 
+  if (!isBlinking && (currentMillis - lastBlink > nextBlinkDelay)) { 
     isBlinking = true;          // Set state to indicate the eyes are now closed
     lastBlink = currentMillis;  // Reset the blink timer to the current time
   }
-
-  // If closed and 150ms have passed...
-   else if (isBlinking && (currentMillis - lastBlink > 150)) { 
-    isBlinking = false;         // Set state back to open
-    lastBlink = currentMillis;  // Reset the blink timer so the 2-5s countdown starts again
+  else if (isBlinking && (currentMillis - lastBlink > 150)) { 
+    isBlinking = false;                  // Set state back to open
+    lastBlink = currentMillis;           // Reset the blink timer
+    nextBlinkDelay = random(2000, 5000); // Roll the next blink delay once per cycle
   }
 
   // 2. Handle Looking Around Logic (Shift gaze every 1-3 seconds)
-
-  // Check if 1-3s have passed since last gaze shift
-  if (currentMillis - lastEyeMove > random(1000, 3000)) { 
-    eyeOffsetX = random(-8, 9); // Picks a random horizontal shift between -8 (left) and +8 (right)
-    eyeOffsetY = random(-6, 7); // Picks a random vertical shift between -6 (up) and +6 (down)
-    lastEyeMove = currentMillis; // Reset the eye movement timer
+  if (currentMillis - lastEyeMove > nextMoveDelay) { 
+    eyeOffsetX = random(-8, 9);         // Picks a random horizontal shift between -8 (left) and +8 (right)
+    eyeOffsetY = random(-6, 7);         // Picks a random vertical shift between -6 (up) and +6 (down)
+    lastEyeMove = currentMillis;        // Reset the eye movement timer
+    nextMoveDelay = random(1000, 3000); // Roll the next gaze delay once per cycle
   }
 
   // 3. Render the Eyes
-
   display.clearDisplay();       // Wipes the OLED screen buffer clean before drawing
 
   int leftEyeCenter_X = 36;     // Sets the base horizontal coordinate for the left eye
@@ -261,16 +385,12 @@ void drawRandomEyes() {
 
   if (isBlinking) {
     // Draw closed eyes (simple horizontal lines)
-    // Draws a 24-pixel wide horizontal white line to represent the closed left eye
     display.drawLine(leftEyeCenter_X - 12, eyeCenter_Y, leftEyeCenter_X + 12, eyeCenter_Y, SH110X_WHITE);
-    // Draws the closed right eye
     display.drawLine(rightEyeCenter_X - 12, eyeCenter_Y, rightEyeCenter_X + 12, eyeCenter_Y, SH110X_WHITE);
   } 
   else {
     // Draw open eyes with current gaze offset
-    // Draws a filled rounded rectangle for the left eye, applying the random X/Y shift
     display.fillRoundRect(leftEyeCenter_X - 12 + eyeOffsetX, eyeCenter_Y - 16 + eyeOffsetY, 24, 32, 6, SH110X_WHITE);
-    // Draws the shifted right eye to match
     display.fillRoundRect(rightEyeCenter_X - 12 + eyeOffsetX, eyeCenter_Y - 16 + eyeOffsetY, 24, 32, 6, SH110X_WHITE);
   }
 
@@ -279,97 +399,151 @@ void drawRandomEyes() {
 
 
 
+void drawShakeEyes() {
+  // Chase the target quickly so the eyes snap with each shake without jittering
+  gazeX += (gazeTargetX - gazeX) * 0.45f;
+  gazeY += (gazeTargetY - gazeY) * 0.45f;
+
+  // Convert normalized gaze (-1.0 to 1.0) into pixel offsets
+  int offX = (int)(gazeX * 10);   // up to 10 px left/right
+  int offY = (int)(gazeY * 8);    // up to 8 px up/down
+
+  display.clearDisplay();
+  // Slightly wide, startled eyes pushed in the direction of the shake
+  display.fillRoundRect(36 - 14 + offX, 32 - 18 + offY, 28, 36, 8, SH110X_WHITE);
+  display.fillRoundRect(92 - 14 + offX, 32 - 18 + offY, 28, 36, 8, SH110X_WHITE);
+  display.display();
+}
+
+
+
+// Draws a rotating spiral (used as the dizzy "pupil")
+void drawSpiral(int cx, int cy, float rot, int maxR) {
+  const int   steps = 36; // Number of line segments forming the spiral
+  const float turns = 2.5;
+  int px = cx, py = cy;
+
+  for (int i = 1; i <= steps; i++) {
+    float p   = (float)i / steps;
+    float ang = rot + p * turns * TWO_PI;
+    float r   = p * maxR;
+    int x = cx + r * cosf(ang);
+    int y = cy + r * sinf(ang);
+
+    // Draw two adjacent lines for a 2px thick spiral stroke
+    display.drawLine(px, py, x, y, SH110X_BLACK);
+    display.drawLine(px + 1, py, x + 1, y, SH110X_BLACK);
+    px = x;
+    py = y;
+  }
+}
+
+
+
 void drawDizzyEyes() {
-  display.clearDisplay();                 // Wipes the OLED screen buffer clean before drawing
-  unsigned long currentTime = millis();   // Grabs the current system time in milliseconds for animation pacing
-  
-  // Add a slight vertical wobble to the whole face
-  // Uses a sine wave function based on time to create a smooth up-and-down bouncing effect
-  int wobbleY = 3 * sin(currentTime * 0.01); 
-  
-  // Rotate the inner pupils in opposite directions for a cute, confused look
-  // Time is multiplied by small decimals to calculate changing rotation angles
-  float angleL = currentTime * 0.006;     // Left pupil spins forward
-  float angleR = -currentTime * 0.005;    // Right pupil spins backward at a slightly different speed
-  
-  int lx = 36;                            // Base horizontal coordinate for the left eye
-  int rx = 92;                            // Base horizontal coordinate for the right eye
-  int cy = 32 + wobbleY;                  // Base vertical coordinate, shifted by the sine wave wobble
-  
-  // Draw the wide white eye bases
-  // Draws the left white eye base, slightly larger than normal open eyes
-  display.fillRoundRect(lx - 14, cy - 18, 28, 36, 8, SH110X_WHITE);
-  // Draws the right white eye base
-  display.fillRoundRect(rx - 14, cy - 18, 28, 36, 8, SH110X_WHITE);
-  
-  // Draw the uncoordinated spinning black pupils
-  int pupilRadius = 6;                    // Sets how large the black pupil circles will be
-  int offsetR = 5;                        // Sets how far from the center the pupils will orbit
-  
-  // Calculates the left pupil's X/Y orbit position using cosine/sine and draws it in black
-  display.fillCircle(lx + offsetR * cos(angleL), cy + offsetR * sin(angleL), pupilRadius, SH110X_BLACK);
-  // Calculates the right pupil's X/Y orbit position and draws it in black
-  display.fillCircle(rx + offsetR * cos(angleR), cy + offsetR * sin(angleR), pupilRadius, SH110X_BLACK);
-  
-  display.display();                      // Pushes the freshly drawn dizzy face to the physical OLED screen
+  static unsigned long lastFrame = 0;
+  static float spinL = 0, spinR = 0, swayPhase = 0, starPhase = 0;
+
+  // Calculate elapsed time (dt) in seconds since the last frame
+  unsigned long now = millis();
+  float dt = (now - lastFrame) / 1000.0f;
+  if (dt > 0.1f) dt = 0.03f;          // Clamp dt on the first frame after entering dizzy state
+  lastFrame = now;
+
+  // "Energy" fades from 1.0 to 0.0 over the 1000ms dizzy duration,
+  // so the spin slows down and the wobble calms before the buddy turns angry
+  float calm   = constrain((now - reactionTimer) / (float)DIZZY_DURATION, 0.0f, 1.0f);
+  float energy = 1.0f - calm;
+  float speed  = 0.3f + 0.7f * energy;
+
+  // Integrate angles (instead of using millis() directly) so changing speed never makes them jump
+  spinL     += 10.0f * speed * dt;    // Left spiral turns clockwise
+  spinR     -= 8.0f  * speed * dt;    // Right spiral turns counter-clockwise, slightly slower
+  swayPhase += 6.0f  * speed * dt;
+  starPhase += 4.0f  * speed * dt;
+
+  // Whole face sways side to side, and the eyes bob out of sync with each other
+  int swayX = (int)(5 * energy * sinf(swayPhase)) + (int)(2 * sinf(swayPhase * 0.5f));
+  int bobL  = (int)(2 * sinf(swayPhase * 1.7f));
+  int bobR  = (int)(2 * sinf(swayPhase * 1.7f + PI));
+
+  int lx = 36 + swayX;
+  int rx = 92 + swayX;
+  int cyL = 32 + bobL;
+  int cyR = 32 + bobR;
+
+  display.clearDisplay();
+
+  // Round white eyes with spinning black spirals on top
+  display.fillCircle(lx, cyL, 15, SH110X_WHITE);
+  display.fillCircle(rx, cyR, 15, SH110X_WHITE);
+  drawSpiral(lx, cyL, spinL, 13);
+  drawSpiral(rx, cyR, spinR, 13);
+
+  // Three little cross-shaped stars orbiting above the head
+  for (int i = 0; i < 3; i++) {
+    float a = starPhase + i * (TWO_PI / 3.0f);
+    int sx = 64 + (int)(34 * cosf(a)) + swayX;
+    int sy = 7  + (int)(4  * sinf(a));
+    display.drawFastHLine(sx - 2, sy, 5, SH110X_WHITE);
+    display.drawFastVLine(sx, sy - 2, 5, SH110X_WHITE);
+  }
+
+  // Wobbly sine-wave mouth at the bottom
+  int prevX = 52 + swayX, prevY = 57;
+  for (int i = 1; i <= 12; i++) {
+    int x = 52 + swayX + i * 2;
+    int y = 57 + (int)(2 * sinf(swayPhase * 2.0f + i * 1.0f));
+    display.drawLine(prevX, prevY, x, y, SH110X_WHITE);
+    prevX = x;
+    prevY = y;
+  }
+
+  display.display();
 }
 
 
 
 void drawAngryEyes() {
-  display.clearDisplay();         // Wipes the OLED screen buffer clean before drawing
-  
-  int leftX = 28;                 // Base horizontal coordinate for the left eye
-  int rightX = 76;                // Base horizontal coordinate for the right eye
-  int y = 20;                     // Base vertical coordinate for both eyes
-  int w = 24;                     // Width of the eyes
-  int h = 28;                     // Height of the eyes
+  display.clearDisplay();
 
-  // 1. Draw solid open eyes
+  const int w = 26, h = 26, y = 20;
+  const int leftX = 24, rightX = 78;   // symmetric around x=64
 
-  // Draws the white rounded rectangle for the left eye
-  display.fillRoundRect(leftX, y, w, h, 4, SH110X_WHITE);
-  // Draws the white rounded rectangle for the right eye
-  display.fillRoundRect(rightX, y, w, h, 4, SH110X_WHITE);
+  // Solid white eyes with soft corners (keeps it cute)
+  display.fillRoundRect(leftX,  y, w, h, 10, SH110X_WHITE);
+  display.fillRoundRect(rightX, y, w, h, 10, SH110X_WHITE);
 
-  // 2. Draw black triangles over the top inner corners to simulate angry brows
-  // By drawing black shapes over the white eyes, we create "negative space" masks
-  
-  // Left eye mask (slants down towards the right)
-  display.fillTriangle(
-    leftX - 5, y - 5,        // Top left corner of the masking triangle
-    leftX + w + 5, y - 5,    // Top right corner of the masking triangle
-    leftX + w + 5, y + 14,   // Bottom right corner (creates the downward inward slant)
-    SH110X_BLACK            // Draws in black to "erase" the top-right corner of the white eye
-  );
+  // Black triangles cut the inner top corners to make the angry slant
+  display.fillTriangle(leftX - 3, y - 3,  leftX + w + 3, y - 3,  leftX + w + 3, y + 16, SH110X_BLACK);
+  display.fillTriangle(rightX + w + 3, y - 3,  rightX - 3, y - 3,  rightX - 3, y + 16, SH110X_BLACK);
 
-  // Right eye mask (slants down towards the left)
-  display.fillTriangle(
-    rightX - 5, y - 5,       // Top left corner of the masking triangle
-    rightX + w + 5, y - 5,   // Top right corner of the masking triangle
-    rightX - 5, y + 14,      // Bottom left corner (creates the downward inward slant)
-    SH110X_BLACK            // Draws in black to "erase" the top-left corner of the white eye
-  );
-
-  display.display();              // Pushes the freshly drawn angry face to the physical OLED screen
+  display.display();
 }
 
 
 
 void drawTimeAndBattery() {
+  // Throttle redraws to once per second unless entering the state for the first time
+  if (!infoNeedsRedraw && (millis() - lastInfoDraw < 1000)) {
+    return;
+  }
+  lastInfoDraw = millis();
+  infoNeedsRedraw = false;
+
   // Clear the OLED screen buffer from whatever was drawn previously
   display.clearDisplay();
+  // Reset to default 5x7 font so OswaldFont from STATE_QUOTE doesn't distort the clock/date
+  display.setFont(NULL);
 
-  // --- 1. Fetch Time ---
-  // Query the Real-Time Clock (RTC) module to get the current date and time
-  DateTime now = rtc.now();
-
-  // --- 2. Calculate Battery Level ---
-  // Read the analog voltage value from the battery pin (0 to 4095 on ESP32/similar ADCs)
-  int rawADC = analogRead(BATTERY_PIN);
+  // --- 1. Calculate Battery Level (averaged over 16 samples to prevent bar flicker) ---
+  long adcSum = 0;
+  for (int i = 0; i < 16; i++) {
+    adcSum += analogRead(BATTERY_PIN);
+  }
+  int rawADC = adcSum / 16;
   
-  // Convert the raw ADC reading (expected between 2047 and 2605) into a percentage (0 to 100)
-  // The constrain() function ensures the final value does not go below 0 or above 100
+  // Convert the averaged ADC reading (expected between 2047 and 2605) into a percentage (0 to 100)
   int batteryPct = constrain(map(rawADC, 2047, 2605, 0, 100), 0, 100);
 
   // Determine number of battery bars (0 to 4) based on the calculated percentage
@@ -379,61 +553,53 @@ void drawTimeAndBattery() {
   else if (batteryPct > 20) numBars = 2;   // Medium battery
   else if (batteryPct > 5)  numBars = 1;   // Low battery (below 5% gets 0 bars)
 
-  // --- 3. Draw Battery Icon with Bars (Top Right) ---
-  // Set the starting X and Y coordinates for the battery icon
+  // --- 2. Draw Battery Icon with Bars (Top Right) ---
   int batX = 96;
   int batY = 2;
   
-  // Draw the hollow outer rectangle of the battery shell (24 pixels wide, 10 pixels tall)
   display.drawRect(batX, batY, 24, 10, SH110X_WHITE);        
-  
-  // Draw the solid small positive terminal "nub" on the right side of the battery
   display.fillRect(batX + 24, batY + 3, 2, 4, SH110X_WHITE); 
   
-  // Loop to draw the individual filled battery bars inside the shell
-  // Each bar is 4 pixels wide and spaced 5 pixels apart (4px bar + 1px gap)
   for (int i = 0; i < numBars; i++) {
     display.fillRect(batX + 2 + (i * 5), batY + 2, 4, 6, SH110X_WHITE);
   }
 
-  // --- 4. Draw Time (Center) ---
-  // Set the text scaling factor to 3 for large time digits
-  display.setTextSize(3);
-  // Set the text color to white (pixels turned on)
-  display.setTextColor(SH110X_WHITE);
-
-  // Create a character array to hold the formatted time string ("HH:MM\0")
+  // --- 3. Format Time & Date (show placeholders if RTC lost power) ---
   char timeStr[6];
-  // Format the hour and minute variables into the array with leading zeros (e.g., "09:05")
-  sprintf(timeStr, "%02d:%02d", now.hour(), now.minute());
+  char bottomStr[15];
 
-  // Move the invisible text cursor to the horizontal and vertical center for the time
+  if (rtcInvalid) {
+    strcpy(timeStr, "--:--");
+    strcpy(bottomStr, "----/--/--");
+  } else {
+    DateTime now = rtc.now();
+    sprintf(timeStr, "%02d:%02d", now.hour(), now.minute());
+    sprintf(bottomStr, "%04d/%02d/%02d", now.year(), now.month(), now.day());
+  }
+
+  // --- 4. Draw Time (Center) ---
+  display.setTextSize(3);
+  display.setTextColor(SH110X_WHITE);
   display.setCursor(19, 23);
-  // Write the time string to the display buffer
   display.print(timeStr);
 
   // --- 5. Draw Date Only (Bottom) ---
-  // Shrink the text scaling factor to 1 for the smaller date text
   display.setTextSize(1);
-  
-  // Create a character array to hold the formatted date string ("YYYY/MM/DD\0")
-  char bottomStr[15];
-  
-  // Format the year, month, and day variables into the array with leading zeros
-  sprintf(bottomStr, "%04d/%02d/%02d", now.year(), now.month(), now.day());
-  
-  // Move the text cursor to the bottom center of the screen for the date
-  display.setCursor(30, 54); 
-  // Write the date string to the display buffer
+  // Centered: 10 chars * 6px = 60px -> (128 - 60) / 2 = 34
+  display.setCursor(34, 54); 
   display.print(bottomStr);
 
-  // Push the completely rendered buffer (battery, time, and date) to the physical OLED screen
   display.display();
 }
 
 
 
 void drawQuote() {
+  // Only wrap and render the quote once per entry to avoid heap fragmentation and I2C spam
+  if (quoteDrawn) {
+    return;
+  }
+
   // If no quote is currently selected, pick a random one
   if (currentQuoteIndex == -1) {
     currentQuoteIndex = random(0, NUM_QUOTES);
@@ -454,92 +620,85 @@ void drawQuote() {
   String quote = String(motivationalQuotes[currentQuoteIndex]);
   
   // --- 1. Break the quote into lines based on screen width ---
-  String lines[8]; // Array to hold the separated lines (max 8 lines supported)
-  int lineCount = 0; // Tracks how many lines we have created
+  // Max 4 lines fit cleanly on a 64px tall OLED with 15px line spacing (4 * 15 = 60px)
+  const int MAX_LINES = 4;
+  String lines[MAX_LINES];
+  int lineCount = 0;
+  bool quoteTruncated = false; // Flags if the quote exceeds 4 lines for Serial debugging
   
-  int lastSpace = 0; // Index of the beginning of the current word
-  int nextSpace = quote.indexOf(' '); // Index of the next space character
-  String currentLine = ""; // Holds the text for the line currently being built
+  int lastSpace = 0;
+  int nextSpace = quote.indexOf(' ');
+  String currentLine = "";
 
   // Loop through the quote word by word
   while (nextSpace != -1) {
-    // Extract the next word from the string
     String word = quote.substring(lastSpace, nextSpace);
-    
-    // Create a temporary test line by appending the new word (and a space if needed)
     String testLine = currentLine + (currentLine.length() > 0 ? " " : "") + word;
     
-    // Variables to hold the pixel dimensions of the text
     int16_t x1, y1;
     uint16_t w, h;
-    
-    // Measure exactly how many pixels wide and tall the test line would be
     display.getTextBounds(testLine, 0, 0, &x1, &y1, &w, &h);
     
-    // If adding this word pushes the line beyond the 128-pixel screen width...
     if (w > SCREEN_WIDTH) {
-      // Memory bounds check: Save the previous valid line ONLY if we haven't hit the 8-line limit
-      if (lineCount < 8) {
-        lines[lineCount++] = currentLine;
+      // Only push currentLine if it's non-empty (prevents blank lines on oversized single words)
+      if (currentLine.length() > 0) {
+        if (lineCount < MAX_LINES) {
+          lines[lineCount++] = currentLine;
+        } else {
+          quoteTruncated = true;
+        }
       }
-      // Start a brand new line with the word that didn't fit
       currentLine = word;
     } else {
-      // If it fits, make the test line the official current line
       currentLine = testLine;
     }
     
-    // Move our indices forward to find the next word
     lastSpace = nextSpace + 1;
     nextSpace = quote.indexOf(' ', lastSpace);
   }
   
-  // Process the final word in the string (which doesn't have a trailing space)
+  // Process the final word in the string
   String lastWord = quote.substring(lastSpace);
   String testLine = currentLine + (currentLine.length() > 0 ? " " : "") + lastWord;
   int16_t x1, y1;
   uint16_t w, h;
   display.getTextBounds(testLine, 0, 0, &x1, &y1, &w, &h);
   
-  // If the final word makes the line too long, split it into two lines
   if (w > SCREEN_WIDTH) {
-    if (lineCount < 8) lines[lineCount++] = currentLine;
-    if (lineCount < 8) lines[lineCount++] = lastWord;
+    if (currentLine.length() > 0) {
+      if (lineCount < MAX_LINES) lines[lineCount++] = currentLine;
+      else quoteTruncated = true;
+    }
+    if (lineCount < MAX_LINES) lines[lineCount++] = lastWord;
+    else quoteTruncated = true;
   } else {
-    // Otherwise, append the final line as is
-    if (lineCount < 8) lines[lineCount++] = testLine;
+    if (lineCount < MAX_LINES) lines[lineCount++] = testLine;
+    else quoteTruncated = true;
+  }
+
+  // Warn over Serial if a quote in quotes.h is too long to fit in 4 lines
+  if (quoteTruncated) {
+    Serial.print("Warning: Quote truncated (>4 lines) at index ");
+    Serial.println(currentQuoteIndex);
   }
 
   // --- 2. Calculate true total height and vertical centering ---
-  int lineHeight = 15; // Vertical pixel spacing between lines
-  
-  // Measure the dimensions of the very first line to establish baseline text metrics
+  int lineHeight = 15;
   display.getTextBounds(lines[0], 0, 0, &x1, &y1, &w, &h);
   
-  // Calculate the total height of the text block: 
-  // Height of one line (h) + the spacing needed for all remaining lines
   int trueTotalHeight = h + ((lineCount - 1) * lineHeight);
-
-  // Calculate the Y coordinate to center the block vertically on the 64-pixel screen.
-  // We subtract y1 because custom GFX fonts draw from a baseline, not the top-left corner.
   int startY = ((SCREEN_HEIGHT - trueTotalHeight) / 2) - y1;
 
   // --- 3. Print each line centered horizontally ---
   for (int i = 0; i < lineCount; i++) {
-    // Measure the exact pixel width of the current line
     display.getTextBounds(lines[i], 0, 0, &x1, &y1, &w, &h);
-    
-    // Calculate the X coordinate to center this specific line horizontally
     int startX = (SCREEN_WIDTH - w) / 2;
-    
-    // Failsafe: If the text is somehow wider than the screen, pin it to the left edge
     if (startX < 0) startX = 0; 
     
-    // Set the cursor for this line, moving down by 'lineHeight' for each subsequent line
     display.setCursor(startX, startY + (i * lineHeight));
     display.print(lines[i]);
   }
   
-  // Push the final rendered quote to the OLED
   display.display();
+  quoteDrawn = true; // Mark as drawn so subsequent loop iterations skip re-rendering
 }
