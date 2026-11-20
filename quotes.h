@@ -228,7 +228,9 @@ const char* const motivationalQuotes[] PROGMEM = {
   "Every sacrifice is shaping your future.",
   "Your future is in your hands.",
   "Imagine driving a Porsche",
-  "You'll be the first doctor in your family"
+  "You'll be the first doctor in your family",
+  "Sacrifice for it or sacrifice it",
+  "Where you are standing was once your goal"
 };
 
 const int NUM_QUOTES = sizeof(motivationalQuotes) / sizeof(motivationalQuotes[0]);
